@@ -48,8 +48,8 @@ sequenceDiagram
 ### 2. 高併發背景處理 (Worker Pool)
 專案啟動了 5 個 `OutboxProcessor` (透過 Goroutines)。利用 SQL `FOR UPDATE SKIP LOCKED` 讓多個 Worker 可以平行處理訊息而不產生競態條件 (Race Condition)。
 
-### 3. 冪等性保障 (Idempotency)
-下游 Consumer (Inventory Service) 在處理前會先檢查 `processed_messages` 表，確保即使因為網落延遲導致重複收到同一則訊息，業務邏輯也只會執行一次。
+### 3. 冪等性保障與狀態回流 (Idempotency & Status Sync)
+下游 Consumer (Inventory Service) 在處理前會先檢查 `processed_messages` 表，確保即使因為網路延遲導致重複收到同一則訊息，業務邏輯也只會執行一次。處理成功後，會同步將 `orders` 表的狀態更新為 `COMPLETED`。
 
 ---
 
@@ -72,7 +72,13 @@ go run cmd/stress_test/main.go
 ```
 送出 50 筆請求後，觀察 Server Log 中 `[Worker-1]` 到 `[Worker-5]` 如何分工處理。
 
-### 4. 驗證冪等性 (Replay)
+### 4. 驗證最終狀態
+執行完壓測後，可以直接進資料庫確認訂單是否從 `PENDING` 轉為 `COMPLETED`：
+```bash
+docker exec outbox_postgres psql -U user -d outbox_db -c "SELECT status, count(*) FROM orders GROUP BY status;"
+```
+
+### 5. 驗證冪等性 (Replay)
 ```bash
 go run cmd/replay/main.go
 ```

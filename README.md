@@ -48,8 +48,8 @@ Ensures "Order Creation" and "Event Notification" are bound. Uses a single DB Tr
 ### 2. High Concurrency Background Processing (Worker Pool)
 Launches 5 concurrent `OutboxProcessor` (via Goroutines). Utilizes SQL `FOR UPDATE SKIP LOCKED` to allow multiple workers to process messages in parallel without race conditions.
 
-### 3. Idempotency Guarantee
-The downstream Consumer (Inventory Service) checks the `processed_messages` table before processing, ensuring business logic executes exactly once even if a message is received multiple times due to network retries.
+### 3. Idempotency & Status Synchronization
+The downstream Consumer (Inventory Service) checks the `processed_messages` table before processing, ensuring business logic executes exactly once even if a message is received multiple times. Upon success, it updates the corresponding order status to `COMPLETED`.
 
 ---
 
@@ -72,7 +72,13 @@ go run cmd/stress_test/main.go
 ```
 Sends 50 simultaneous requests. Observe server logs to see how `[Worker-1]` through `[Worker-5]` share the workload.
 
-### 4. Verify Idempotency (Replay)
+### 4. Verify Final Status
+After running the stress test, verify that orders have moved from `PENDING` to `COMPLETED`:
+```bash
+docker exec outbox_postgres psql -U user -d outbox_db -c "SELECT status, count(*) FROM orders GROUP BY status;"
+```
+
+### 5. Verify Idempotency (Replay)
 ```bash
 go run cmd/replay/main.go
 ```

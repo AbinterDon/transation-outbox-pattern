@@ -56,6 +56,12 @@ func (c *InventoryConsumer) HandleMessage(ctx context.Context, messageID string,
 	// Simulate work
 	time.Sleep(50 * time.Millisecond)
 
+	// UPDATE Order status to COMPLETED
+	_, err = tx.Exec(ctx, "UPDATE orders SET status = 'COMPLETED' WHERE id = $1", event.ID)
+	if err != nil {
+		return fmt.Errorf("failed to update order status: %w", err)
+	}
+
 	// 4. Record Processed Message
 	_, err = tx.Exec(ctx, "INSERT INTO processed_messages (message_id, processed_at) VALUES ($1, $2)", messageID, time.Now())
 	if err != nil {
