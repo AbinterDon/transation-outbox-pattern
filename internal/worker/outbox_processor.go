@@ -11,11 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type OutboxProcessor struct {
-	db        *pgxpool.Pool
-	publisher Publisher
-}
-
 type Publisher interface {
 	Publish(ctx context.Context, id string, topic string, payload []byte) error
 }
@@ -30,8 +25,15 @@ func (p *MockPublisher) Publish(ctx context.Context, id string, topic string, pa
 	return nil
 }
 
-func NewOutboxProcessor(db *pgxpool.Pool, pub Publisher) *OutboxProcessor {
+type OutboxProcessor struct {
+	id        int
+	db        *pgxpool.Pool
+	publisher Publisher
+}
+
+func NewOutboxProcessor(id int, db *pgxpool.Pool, pub Publisher) *OutboxProcessor {
 	return &OutboxProcessor{
+		id:        id,
 		db:        db,
 		publisher: pub,
 	}
@@ -40,6 +42,8 @@ func NewOutboxProcessor(db *pgxpool.Pool, pub Publisher) *OutboxProcessor {
 func (p *OutboxProcessor) Start(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+
+	log.Printf("[Worker-%d] Started", p.id)
 
 	for {
 		select {
@@ -62,7 +66,7 @@ func (p *OutboxProcessor) processBatch(ctx context.Context) {
 		FOR UPDATE SKIP LOCKED
 	`)
 	if err != nil {
-		log.Printf("[Processor] Failed to fetch events: %v", err)
+		log.Printf("[Worker-%d] Failed to fetch events: %v", p.id, err)
 		return
 	}
 	defer rows.Close()
@@ -71,7 +75,7 @@ func (p *OutboxProcessor) processBatch(ctx context.Context) {
 	for rows.Next() {
 		var e model.OutboxEvent
 		if err := rows.Scan(&e.ID, &e.AggregateID, &e.Payload, &e.Status); err != nil {
-			log.Printf("[Processor] Failed to scan row: %v", err)
+			log.Printf("[Worker-%d] Failed to scan row: %v", p.id, err)
 			continue
 		}
 		events = append(events, e)
@@ -81,7 +85,7 @@ func (p *OutboxProcessor) processBatch(ctx context.Context) {
 		return
 	}
 
-	log.Printf("[Processor] Processing batch of %d events", len(events))
+	log.Printf("[Worker-%d] Processing batch of %d events", p.id, len(events))
 
 	// 2. Process each event
 	for _, event := range events {
@@ -93,7 +97,7 @@ func (p *OutboxProcessor) processEvent(ctx context.Context, event model.OutboxEv
 	// Parse payload to find topic or routing key (simplified here)
 	var payloadMap map[string]interface{}
 	if err := json.Unmarshal(event.Payload, &payloadMap); err != nil {
-		log.Printf("[Processor] Invalid payload: %v", err)
+		log.Printf("[Worker-%d] Invalid payload: %v", p.id, err)
 		return // Should mark as FAILED in real life
 	}
 
@@ -102,16 +106,16 @@ func (p *OutboxProcessor) processEvent(ctx context.Context, event model.OutboxEv
 	// 3. Publish to Broker
 	err := p.publisher.Publish(ctx, event.ID, eventType, event.Payload)
 	if err != nil {
-		log.Printf("[Processor] Failed to publish event %s: %v", event.ID, err)
+		log.Printf("[Worker-%d] Failed to publish event %s: %v", p.id, event.ID, err)
 		return // Will be retried next tick
 	}
 
 	// 4. Delete processed event (or update status to PROCESSED)
 	_, err = p.db.Exec(ctx, "DELETE FROM outbox WHERE id = $1", event.ID)
 	if err != nil {
-		log.Printf("[Processor] Failed to delete event %s: %v", event.ID, err)
+		log.Printf("[Worker-%d] Failed to delete event %s: %v", p.id, event.ID, err)
 		// This is where "At-Least-Once" comes in. If we fail here, we republish next time.
 	} else {
-		log.Printf("[Processor] Successfully processed and deleted event %s", event.ID)
+		log.Printf("[Worker-%d] Successfully processed and deleted event %s", p.id, event.ID)
 	}
 }

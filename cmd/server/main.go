@@ -38,10 +38,11 @@ func main() {
 	// Bus (Publisher)
 	msgBus := worker.NewInMemoryBus(consumerSvc)
 
-	processor := worker.NewOutboxProcessor(pool, msgBus)
-
-	// Run processor in background
-	go processor.Start(ctx)
+	// Start 5 concurrent workers
+	for i := 1; i <= 5; i++ {
+		processor := worker.NewOutboxProcessor(i, pool, msgBus)
+		go processor.Start(ctx)
+	}
 
 	// 3. HTTP Handlers
 	http.HandleFunc("/orders", func(w http.ResponseWriter, r *http.Request) {

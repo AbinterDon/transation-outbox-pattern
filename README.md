@@ -2,17 +2,56 @@
 
 [中文版 (Chinese Version)](README_zh.md)
 
-## Introduction
-This project is an example implementation of the **Transactional Outbox Pattern** using Go and PostgreSQL.
-It simulates an order system to solve the **Dual Write Problem** in microservices architectures, ensuring:
-1.  **Atomicity**: Consistency between order creation and event publishing.
-2.  **Reliability (At-least-once Delivery)**: Messages are guaranteed to be delivered eventually, even in the event of failures.
-3.  **Idempotency**: The Consumer handles duplicate messages to prevent business logic from being executed multiple times.
+## System Architecture
 
-## Tech Stack
--   Go (Golang)
--   PostgreSQL (Database & Queue implementation)
--   Docker & Docker Compose
+### 🏗️ System Flow (Sequence Diagram)
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as Order API
+    participant DB as Postgres (Orders + Outbox)
+    participant Worker as Outbox Processor
+    participant Consumer as Inventory Service
+
+    Client->>API: POST /orders (Place Order)
+    rect rgb(240, 248, 255)
+    Note over API, DB: Transaction START
+    API->>DB: INSERT into orders
+    API->>DB: INSERT into outbox (OrderCreated Event)
+    Note over API, DB: Transaction COMMIT (Atomicity!)
+    end
+    API-->>Client: 200 OK (Success)
+
+    loop Every Second
+        Worker->>DB: SELECT ... SKIP LOCKED (Fetch pending events)
+        DB-->>Worker: Return event data
+        Worker->>Consumer: Publish OrderCreated Event
+        rect rgb(255, 240, 245)
+        Note over Consumer, DB: Transaction START
+        Consumer->>DB: Check processed_messages (Idempotency)
+        Consumer->>DB: Business Logic (Deduct Inventory)
+        Consumer->>DB: INSERT into processed_messages
+        Note over Consumer, DB: Transaction COMMIT
+        end
+        Worker->>DB: DELETE from outbox (Handled)
+    end
+```
+
+---
+
+## 🔍 Core Mechanisms
+
+### 1. Atomic Write
+Ensures "Order Creation" and "Event Notification" are bound. Uses a single DB Transaction to write to both `orders` and `outbox` tables, solving the Dual Write problem.
+
+### 2. High Concurrency Background Processing (Worker Pool)
+Launches 5 concurrent `OutboxProcessor` (via Goroutines). Utilizes SQL `FOR UPDATE SKIP LOCKED` to allow multiple workers to process messages in parallel without race conditions.
+
+### 3. Idempotency Guarantee
+The downstream Consumer (Inventory Service) checks the `processed_messages` table before processing, ensuring business logic executes exactly once even if a message is received multiple times due to network retries.
+
+---
 
 ## Quick Start
 
@@ -20,41 +59,32 @@ It simulates an order system to solve the **Dual Write Problem** in microservice
 ```bash
 docker-compose up -d
 ```
-This starts PostgreSQL and automatically executes `migrations/init.sql` to create the required tables (`orders`, `outbox`, `processed_messages`).
-*Note: The project maps PostgreSQL to host port `5433` to avoid conflicts with default ports.*
+*Note: PostgreSQL is mapped to port `5433`.*
 
 ### 2. Start the API Server
 ```bash
 go run cmd/server/main.go
 ```
-The server listens on port `:8080`.
 
-### 3. Test Order Creation (Atomic Write)
-Send an HTTP POST request to create an order:
+### 3. Concurrency Stress Test
 ```bash
-curl -X POST http://localhost:8080/orders \
--H "Content-Type: application/json" \
--d '{"user_id": "550e8400-e29b-41d4-a716-446655440000", "amount": 100.0}'
+go run cmd/stress_test/main.go
 ```
-Check the server logs. You will see an order being created and a corresponding event in the `outbox` table. The background `OutboxProcessor` automatically picks it up and processes it.
+Sends 50 simultaneous requests. Observe server logs to see how `[Worker-1]` through `[Worker-5]` share the workload.
 
-### 4. Test Idempotency
-We provide a Replay script to simulate "receiving the same message twice":
+### 4. Verify Idempotency (Replay)
 ```bash
 go run cmd/replay/main.go
 ```
-This script attempts to send the same Message ID to the Consumer twice.
-**Expected Result**: The first attempt is processed successfully (`PROCESSING`), and the second attempt is skipped (`SKIPPING duplicate message`).
+Tests duplicate Message IDs and observes "SKIPPING" behavior in the consumer.
+
+---
 
 ## Project Structure
--   `cmd/server`: API Server entry point.
--   `cmd/replay`: Tool for testing idempotency.
--   `internal/usecase`: Business logic (`CreateOrder`), containing the core implementation of the Transactional Outbox.
--   `internal/worker`: Background Outbox Processor (Producer), responsible for Polling and Relaying. Uses `SKIP LOCKED` for concurrency safety.
--   `internal/consumer`: Simulated downstream service (Consumer), implementing Idempotency by checking the `processed_messages` table.
--   `migrations`: Database initialization SQL.
+- `cmd/server`: Main API & Worker pool entry point.
+- `cmd/stress_test`: Concurrency testing tool.
+- `internal/usecase`: Core atomic transaction logic.
+- `internal/worker`: SKIP LOCKED background polling.
+- `internal/consumer`: Idempotency logic.
+- `migrations`: SQL Schema definitions.
 
-## Key Implementation Details
-*   **CreateOrder**: Performs `INSERT orders` and `INSERT outbox` within a single DB Transaction.
-*   **Outbox Processor**: Uses `SELECT ... FOR UPDATE SKIP LOCKED` to prevent race conditions between multiple processors.
-*   **Delivery Guarantee**: Adopts **At-least-once** strategy; Consumers must implement idempotency to handle potential duplicate messages.
