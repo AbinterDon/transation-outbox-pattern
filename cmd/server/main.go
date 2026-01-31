@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 
-	"transation-outbox-pattern/internal/consumer"
 	"transation-outbox-pattern/internal/db"
 	"transation-outbox-pattern/internal/usecase"
 	"transation-outbox-pattern/internal/worker"
@@ -33,10 +32,13 @@ func main() {
 	orderService := usecase.NewOrderService(pool)
 
 	// 3. Initialize & Start Outbox Processor
-	// Consumer
-	consumerSvc := consumer.NewInventoryConsumer(pool)
-	// Bus (Publisher)
-	msgBus := worker.NewInMemoryBus(consumerSvc)
+	// RabbitMQ Publisher
+	rabbitURL := "amqp://user:password@localhost:5672/"
+	msgBus, err := worker.NewRabbitMQPublisher(rabbitURL, "order_events")
+	if err != nil {
+		log.Fatalf("Failed to initialize RabbitMQ publisher: %v", err)
+	}
+	defer msgBus.Close()
 
 	// Start 5 concurrent workers
 	for i := 1; i <= 5; i++ {

@@ -13,3 +13,14 @@ services:
     volumes:
       - ./migrations/init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: outbox_rabbitmq
+    ports:
+      - "5672:5672" # AMQP
+      - "15672:15672" # Management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: password
+    restart: unless-stopped
