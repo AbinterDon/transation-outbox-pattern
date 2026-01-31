@@ -31,6 +31,7 @@ sequenceDiagram
         Note over Consumer, DB: Transaction START
         Consumer->>DB: Check processed_messages (Idempotency)
         Consumer->>DB: Business Logic (Deduct Inventory)
+        Consumer->>DB: UPDATE orders status (COMPLETED)
         Consumer->>DB: INSERT into processed_messages
         Note over Consumer, DB: Transaction COMMIT
         end

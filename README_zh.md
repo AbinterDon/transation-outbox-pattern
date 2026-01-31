@@ -29,8 +29,9 @@ sequenceDiagram
         Worker->>Consumer: 發送 OrderCreated 事件
         rect rgb(255, 240, 245)
         Note over Consumer, DB: Transaction START
-        Consumer->>DB: 檢查 processed_messages (Idempotency)
+        Consumer->>DB: Check processed_messages (Idempotency)
         Consumer->>DB: 執行業務邏輯 (扣庫存)
+        Consumer->>DB: UPDATE orders status (COMPLETED)
         Consumer->>DB: INSERT into processed_messages
         Note over Consumer, DB: Transaction COMMIT
         end
