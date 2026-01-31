@@ -80,11 +80,20 @@ Tests duplicate Message IDs and observes "SKIPPING" behavior in the consumer.
 
 ---
 
-## Project Structure
-- `cmd/server`: Main API & Worker pool entry point.
-- `cmd/stress_test`: Concurrency testing tool.
-- `internal/usecase`: Core atomic transaction logic.
-- `internal/worker`: SKIP LOCKED background polling.
-- `internal/consumer`: Idempotency logic.
-- `migrations`: SQL Schema definitions.
+## 📂 Project Layout (Standard Go Layout)
+
+This project follows the [golang-standards/project-layout](https://github.com/golang-standards/project-layout) convention:
+- **`cmd/`**: Entry points. Each subdirectory corresponds to a binary.
+- **`internal/`**: Private code. Go restricts access from other projects, ensuring encapsulation.
+- **`internal/usecase/`**: Service Layer, where core transactional operations live.
+- **`internal/worker/` & `internal/consumer/`**: Infrastructure Layer, handling concurrency and consumption.
+
+---
+
+## 🍣 Business Behavior (The Metaphor)
+
+Imagine a **busy Sushi delivery shop**:
+1. **The Counter (Atomicity)**: The clerk writes an "Order" and a "Memo (Event)" simultaneously. Both must be filed together, or neither exists.
+2. **Delivery Workers (Worker Pool)**: 5 workers check the counter. The rule is: "If someone is already touching a memo, skip it (SKIP LOCKED)." This allows everyone to work in parallel.
+3. **The Warehouse (Idempotency)**: The manager keeps a "Processed ID Log." If a worker delivers the same memo twice, the manager ignores the second one after checking the log.
 
