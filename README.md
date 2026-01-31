@@ -4,39 +4,42 @@
 
 ## System Architecture
 
-### 🏗️ System Flow (Sequence Diagram)
+### 🏗️ System Flow (Distributed Architecture)
 
 ```mermaid
 sequenceDiagram
     participant Client
-    participant API as Order API
+    participant OrderSvc as Order Service (API)
     participant DB as Postgres (Orders + Outbox)
     participant Worker as Outbox Processor
-    participant Consumer as Inventory Service
+    participant MQ as RabbitMQ (Message Broker)
+    participant Consumer as Inventory Service (Standalone)
 
-    Client->>API: POST /orders (Place Order)
+    Client->>OrderSvc: POST /orders (Place Order)
     rect rgb(240, 248, 255)
-    Note over API, DB: Transaction START
-    API->>DB: INSERT into orders
-    API->>DB: INSERT into outbox (OrderCreated Event)
-    Note over API, DB: Transaction COMMIT (Atomicity!)
+    Note over OrderSvc, DB: Atomic Transaction
+    OrderSvc->>DB: INSERT orders (PENDING)
+    OrderSvc->>DB: INSERT outbox
+    Note over OrderSvc, DB: Commit (Guaranteed!)
     end
-    API-->>Client: 200 OK (Success)
+    OrderSvc-->>Client: 200 OK
 
-    loop Every Second
-        Worker->>DB: SELECT ... SKIP LOCKED (Fetch pending events)
-        DB-->>Worker: Return event data
-        Worker->>Consumer: Publish OrderCreated Event
-        rect rgb(255, 240, 245)
-        Note over Consumer, DB: Transaction START
-        Consumer->>DB: Check processed_messages (Idempotency)
-        Consumer->>DB: Business Logic (Deduct Inventory)
-        Consumer->>DB: UPDATE orders status (COMPLETED)
-        Consumer->>DB: INSERT into processed_messages
-        Note over Consumer, DB: Transaction COMMIT
-        end
-        Worker->>DB: DELETE from outbox (Handled)
+    loop Background Relay
+        Worker->>DB: SELECT FOR UPDATE SKIP LOCKED
+        Worker->>MQ: Publish to "order_events"
+        MQ-->>Worker: Ack (Received)
+        Worker->>DB: DELETE from outbox
     end
+
+    MQ->>Consumer: Push Message
+    rect rgb(255, 240, 245)
+    Note over Consumer, DB: Idempotent Transaction
+    Consumer->>DB: Check processed_messages
+    Consumer->>DB: UPDATE orders status (COMPLETED)
+    Consumer->>DB: INSERT processed_messages
+    Note over Consumer, DB: Commit (Eventual Consistency)
+    end
+    Consumer-->>MQ: Ack (Completed)
 ```
 
 ---
@@ -49,58 +52,60 @@ Ensures "Order Creation" and "Event Notification" are bound. Uses a single DB Tr
 ### 2. High Concurrency Background Processing (Worker Pool)
 Launches 5 concurrent `OutboxProcessor` (via Goroutines). Utilizes SQL `FOR UPDATE SKIP LOCKED` to allow multiple workers to process messages in parallel without race conditions.
 
-### 3. Idempotency & Status Synchronization
-The downstream Consumer (Inventory Service) checks the `processed_messages` table before processing, ensuring business logic executes exactly once even if a message is received multiple times. Upon success, it updates the corresponding order status to `COMPLETED`.
+### 3. Decoupling & Reliable Delivery (RabbitMQ)
+Introduces a real message broker. The Order Service only moves messages to MQ and doesn't wait for downstreams. This enables **load leveling** and **fault tolerance**—if a consumer is down, messages wait safely in the queue.
+
+### 4. Idempotency & Status Synchronization
+The downstream Consumer checks the `processed_messages` table before processing, ensuring logic executes exactly once. Upon success, it updates the order status to `COMPLETED`.
 
 ---
 
 ## Quick Start
 
-### 1. Start the Database
+### 1. Start Infrastructure
 ```bash
 docker-compose up -d
 ```
-*Note: PostgreSQL is mapped to port `5433`.*
+*Starts PostgreSQL (5433) and RabbitMQ (5672/15672).*
 
-### 2. Start the API Server
+### 2. Start API Server & Relay
 ```bash
 go run cmd/server/main.go
 ```
 
-### 3. Concurrency Stress Test
+### 3. Start Standalone Consumer (Separate Microservice)
+```bash
+go run cmd/worker_consumer/main.go
+```
+
+### 4. Stress Test & Observation
 ```bash
 go run cmd/stress_test/main.go
 ```
-Sends 50 simultaneous requests. Observe server logs to see how `[Worker-1]` through `[Worker-5]` share the workload.
+Observe how the server publishes to RabbitMQ and how the consumer handles messages asynchronously.
 
-### 4. Verify Final Status
-After running the stress test, verify that orders have moved from `PENDING` to `COMPLETED`:
+### 5. Verify Final Status
 ```bash
 docker exec outbox_postgres psql -U user -d outbox_db -c "SELECT status, count(*) FROM orders GROUP BY status;"
 ```
-
-### 5. Verify Idempotency (Replay)
-```bash
-go run cmd/replay/main.go
-```
-Tests duplicate Message IDs and observes "SKIPPING" behavior in the consumer.
 
 ---
 
 ## 📂 Project Layout (Standard Go Layout)
 
 This project follows the [golang-standards/project-layout](https://github.com/golang-standards/project-layout) convention:
-- **`cmd/`**: Entry points. Each subdirectory corresponds to a binary.
-- **`internal/`**: Private code. Go restricts access from other projects, ensuring encapsulation.
-- **`internal/usecase/`**: Service Layer, where core transactional operations live.
-- **`internal/worker/` & `internal/consumer/`**: Infrastructure Layer, handling concurrency and consumption.
+- **`cmd/server`**: API & Outbox Worker entry point.
+- **`cmd/worker_consumer`**: Standalone consumer (RabbitMQ listener).
+- **`internal/worker`**: RabbitMQ Publisher implementation and relay logic.
+- **`internal/usecase`**: Core atomic transaction logic.
 
 ---
 
 ## 🍣 Business Behavior (The Metaphor)
 
 Imagine a **busy Sushi delivery shop**:
-1. **The Counter (Atomicity)**: The clerk writes an "Order" and a "Memo (Event)" simultaneously. Both must be filed together, or neither exists.
-2. **Delivery Workers (Worker Pool)**: 5 workers check the counter. The rule is: "If someone is already touching a memo, skip it (SKIP LOCKED)." This allows everyone to work in parallel.
-3. **The Warehouse (Idempotency)**: The manager keeps a "Processed ID Log." If a worker delivers the same memo twice, the manager ignores the second one after checking the log.
+1. **The Counter (Atomicity)**: The clerk writes an "Order" and a "Memo" simultaneously. Both must be filed together, or neither exists.
+2. **Delivery Workers (Worker Pool)**: 5 workers check the counter. The rule is: "If someone is already touching a memo, skip it." They take memos to the **Post Office (RabbitMQ)**.
+3. **The Post Office (Message Queue)**: Guaranteed delivery. Even if the warehouse is closed today, the memo waits in the mailbox.
+4. **The Warehouse (Idempotency)**: The manager checks a "Processed Log" before picking items. If the same memo arrives twice, it's ignored.
 
